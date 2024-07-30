@@ -15,7 +15,7 @@ import {IEntryPoint} from "account-abstraction/interfaces/IEntryPoint.sol";
 import "forge-std/console.sol";
 import {ECDSA} from "solady/utils/ECDSA.sol";
 import {ExecMode, ExecLib} from "kernel/src/utils/ExecLib.sol";
-import {SignatureRequestorEnforcer} from "src/SignatureRequestorEnforcer.sol";
+import {IUSDC, PERMIT_TYPEHASH, PermitEnforcer, PermitTerms, PermitArgs} from "src/PermitEnforcer.sol";
 
 contract MockCallee {
     mapping(address caller => uint256) public barz;
@@ -37,20 +37,6 @@ contract MockERC20 is ERC20 {
     function mint(address _to, uint256 _amount) external {
         _mint(_to, _amount);
     }
-}
-
-// keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)")
-bytes32 constant PERMIT_TYPEHASH = 0x6e71edae12b1b97f4d1f60370fef10105fa2faae0126114a169c64845d6126c9;
-
-interface IUSDC {
-    function balanceOf(address account) external view returns (uint256);
-    function mint(address to, uint256 amount) external;
-    function configureMinter(address minter, uint256 minterAllowedAmount) external;
-    function masterMinter() external view returns (address);
-    function DOMAIN_SEPARATOR() external view returns (bytes32);
-    function permit(address owner, address spender, uint256 value, uint256 deadline, bytes memory signature) external;
-    function nonces(address owner) external view returns (uint256);
-    function allowance(address owner, address spender) external view returns (uint256);
 }
 
 contract DMTest is Test {
@@ -97,9 +83,9 @@ contract DMTest is Test {
     }
 
     function testSessionKeyUseOnlyUSDCPermit() external {
-        SignatureRequestorEnforcer signatureRequestorEnforcer = new SignatureRequestorEnforcer();
         //// USDC contract address on mainnet
         IUSDC usdc = IUSDC(0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48);
+        PermitEnforcer signatureRequestorEnforcer = new PermitEnforcer(usdc);
 
         // spoof .configureMinter() call with the master minter account
         vm.prank(usdc.masterMinter());
@@ -108,6 +94,8 @@ contract DMTest is Test {
         // mint $1000 USDC to the test contract (or an external user)
         usdc.mint(address(this), 1000e6);
         vm.stopPrank();
+
+        address spender = makeAddr("Spender");
 
         Delegation[] memory d = new Delegation[](2);
         Caveat[] memory e = new Caveat[](0);
@@ -121,8 +109,17 @@ contract DMTest is Test {
         });
         console.log("Master : ", master);
         // delegate usdc permit signature to session
+        uint256 allowance = 1000;
         Caveat[] memory c = new Caveat[](1);
-        c[0] = Caveat({enforcer: address(signatureRequestorEnforcer), terms: abi.encode(address(usdc)), args: hex""});
+        PermitTerms memory pt = PermitTerms({owner: address(subAccount), spender: spender, maximum: 10000});
+        PermitArgs memory pa = PermitArgs({value: 1000, nonce: usdc.nonces(owner), deadline: block.timestamp + 1000});
+
+        bytes32 permitHash = MessageHashUtils.toTypedDataHash(
+            usdc.DOMAIN_SEPARATOR(),
+            keccak256(abi.encode(PERMIT_TYPEHASH, pt.owner, pt.spender, pa.value, pa.nonce, pa.deadline))
+        );
+
+        c[0] = Caveat({enforcer: address(signatureRequestorEnforcer), terms: abi.encode(pt), args: abi.encode(pa)});
         d[0] = Delegation({
             delegate: session,
             delegator: master,
@@ -132,17 +129,6 @@ contract DMTest is Test {
             signature: hex""
         });
         d[0].signature = signDelegation(d[0], masterKey);
-
-        address spender = makeAddr("Spender");
-        uint256 allowance = 1000;
-        bytes32 permitHash = MessageHashUtils.toTypedDataHash(
-            usdc.DOMAIN_SEPARATOR(),
-            keccak256(
-                abi.encode(
-                    PERMIT_TYPEHASH, address(subAccount), spender, allowance, usdc.nonces(owner), block.timestamp + 1000
-                )
-            )
-        );
 
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(sessionKey, permitHash);
         usdc.permit(
@@ -154,6 +140,68 @@ contract DMTest is Test {
         );
 
         assertEq(usdc.allowance(address(subAccount), spender), allowance);
+    }
+
+    function testSessionKeyUseOnlyUSDCPermitExceedsMaximum() external {
+        //// USDC contract address on mainnet
+        IUSDC usdc = IUSDC(0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48);
+        PermitEnforcer signatureRequestorEnforcer = new PermitEnforcer(usdc);
+
+        // spoof .configureMinter() call with the master minter account
+        vm.prank(usdc.masterMinter());
+        // allow this test contract to mint USDC
+        usdc.configureMinter(address(this), type(uint256).max);
+        // mint $1000 USDC to the test contract (or an external user)
+        usdc.mint(address(this), 1000e6);
+        vm.stopPrank();
+
+        address spender = makeAddr("Spender");
+
+        Delegation[] memory d = new Delegation[](2);
+        Caveat[] memory e = new Caveat[](0);
+        d[1] = Delegation({
+            delegate: master,
+            delegator: address(subAccount),
+            authority: ROOT_AUTHORITY,
+            caveats: e,
+            salt: 0,
+            signature: hex""
+        });
+        console.log("Master : ", master);
+        // delegate usdc permit signature to session
+        uint256 allowance = 1000;
+        Caveat[] memory c = new Caveat[](1);
+        PermitTerms memory pt = PermitTerms({owner: address(subAccount), spender: spender, maximum: 10000});
+        PermitArgs memory pa =
+            PermitArgs({value: pt.maximum + 1, nonce: usdc.nonces(owner), deadline: block.timestamp + 1000});
+
+        bytes32 permitHash = MessageHashUtils.toTypedDataHash(
+            usdc.DOMAIN_SEPARATOR(),
+            keccak256(abi.encode(PERMIT_TYPEHASH, pt.owner, pt.spender, pa.value, pa.nonce, pa.deadline))
+        );
+
+        c[0] = Caveat({enforcer: address(signatureRequestorEnforcer), terms: abi.encode(pt), args: abi.encode(pa)});
+        d[0] = Delegation({
+            delegate: session,
+            delegator: master,
+            authority: dm.getDelegationHash(d[1]),
+            caveats: c,
+            salt: 0,
+            signature: hex""
+        });
+        d[0].signature = signDelegation(d[0], masterKey);
+
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(sessionKey, permitHash);
+        vm.expectRevert();
+        usdc.permit(
+            address(subAccount),
+            spender,
+            allowance,
+            block.timestamp + 1000,
+            abi.encode(d, bytes.concat(r, s, bytes1(v)))
+        );
+
+        assertEq(usdc.allowance(address(subAccount), spender), 0);
     }
 
     function signDelegation(Delegation memory delegation, uint256 key) internal returns (bytes memory) {
