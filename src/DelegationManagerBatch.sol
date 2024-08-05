@@ -83,6 +83,11 @@ contract DelegationManagerBatch is IDelegationManagerBatch, Ownable2Step, Pausab
     }
 
     /**
+     * @notice Allows the Kernel v3 to install DM as an executor
+     */
+    function onInstall(bytes calldata) external {}
+
+    /**
      * @notice This method is used to cache a delegation's hash onchain for future use
      * @dev This method MUST be called by the delegator
      * @dev Caching a delegation onchain allows the system to trust that the delegation was already authorized at the time of
