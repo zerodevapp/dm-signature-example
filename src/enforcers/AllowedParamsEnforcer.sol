@@ -167,14 +167,4 @@ contract AllowedParamsEnforcer is CaveatEnforcerBatch {
     function getTermsInfo(bytes calldata _terms) public pure returns (Permission[] memory permissions) {
         (permissions) = abi.decode(_terms, (Permission[]));
     }
-
-    /**
-     * @dev Compares two byte arrays for equality.
-     * @param _a The first byte array.
-     * @param _b The second byte array.
-     * @return A boolean indicating whether the byte arrays are equal.
-     */
-    function _compare(bytes memory _a, bytes memory _b) private pure returns (bool) {
-        return keccak256(_a) == keccak256(_b);
-    }
 }
